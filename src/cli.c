@@ -11,17 +11,22 @@ int main(int argc, char **argv){
     Inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
     sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
 
-//    Bind(sockfd, (SA *)&servaddr, sizeof(servaddr));
     
     char sendline[MAXLINE], recvline[MAXLINE];
     
     fd_set readfs;
 
     int maxfd = max(STDIN_FILENO, sockfd);
+    
+    printf("$> ");
+    fflush(stdout);
     while(1){
+        
+        
         FD_ZERO(&readfs);
         FD_SET(STDIN_FILENO, &readfs);
         FD_SET(sockfd, &readfs);
+        int maxfd = max(STDIN_FILENO, sockfd);
         int status = select(maxfd+1, &readfs, NULL, NULL, NULL);
         if (status < 0){
             fprintf(stderr, "error: Can't select on sockets");
@@ -34,6 +39,11 @@ int main(int argc, char **argv){
         }
         else if (FD_ISSET(STDIN_FILENO, &readfs)){
             if(Fgets(sendline, MAXLINE, stdin) != NULL){
+                if (sendline[0] == '\n' || sendline[0] == 0x0){
+                    printf("$> ");
+                    fflush(stdout);
+                    continue;
+                }
                 Sendto(sockfd, "REQ", strlen("REQ"), 0, (SA *)&servaddr, sizeof(servaddr));
                 char eph_port[MAXLINE];
                 // Also acts as ACK to command
@@ -53,8 +63,8 @@ int main(int argc, char **argv){
                 ephaddr.sin_family = AF_INET;
                 ephaddr.sin_port = htons((int) strtol(eph_port, (char **)NULL, 10));
                 Inet_pton(AF_INET, argv[1], &ephaddr.sin_addr); 
-        
-                Sendto(sockfd, sendline, strlen(sendline), 0, (SA *)&ephaddr, sizeof(ephaddr));
+                sockfd = ephsock;
+                Sendto(ephsock, sendline, strlen(sendline), 0, (SA *)&ephaddr, sizeof(ephaddr));
                  
             }
         }

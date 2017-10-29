@@ -1,5 +1,6 @@
 #include "unp.h"
 #include <dirent.h>
+#define SHARED_PATH "./"
 int main(int argc, char **argv){
     int sockfd;
     struct sockaddr_in servaddr, cliaddr;
@@ -42,16 +43,13 @@ int main(int argc, char **argv){
             Sendto(sockfd, ephport_res, strlen(ephport_res), 0, (SA *)&cliaddr, len);
 
             char command[MAXLINE];
-            printf("nhgnnghnhlist issued");
-                fflush(stdout);
+            fflush(stdout);
             int n = Recvfrom(eph_sock, command, MAXLINE, 0, (SA *)&cliaddr, &len);
 
-            printf("list issued");
-                fflush(stdout);
             if (strcmp(command, "list") >= 0){
-                printf("list issued");
-                fflush(stdout);
-                DIR *p_dir = opendir(".");
+      //          printf("list issued");
+     //           fflush(stdout);
+                DIR *p_dir = opendir(SHARED_PATH);
                 char resp[MAXLINE];
                 if (p_dir == NULL){
                     strcpy(resp, "Can't open present directory for reading");
@@ -65,6 +63,28 @@ int main(int argc, char **argv){
                         Sendto(sockfd, resp, strlen(resp), 0, (SA *)&cliaddr, len);
                     }
                     closedir (p_dir);
+                }
+            }
+            else if (strcmp(command, "download") >= 0){
+     //           printf("download issued");
+       //         fflush(stdout);
+                char *d_args = strtok(command, " ");
+                d_args = strtok(NULL, " \n");
+                char path[MAXLINE];
+                strcpy(path, SHARED_PATH);
+                strcat(path, d_args);
+    //            printf("Path: %s\n", path);
+      //          fflush(stdout);
+                int fd = open(path, O_RDONLY);
+                if (fd < 0){
+                    char *msg = "Error Downloading file from server"; 
+                    Sendto(sockfd, msg, strlen(msg), 0, (SA *) &cliaddr, len);
+                    continue;
+                }
+                char file_buf[MAXLINE];
+                int n;
+                while ((n = read(fd, file_buf, MAXLINE)) > 0) {
+                    sendto(sockfd, file_buf, n, 0, (SA *) &cliaddr, len);
                 }
             }
             else
