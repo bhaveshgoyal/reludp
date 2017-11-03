@@ -10,15 +10,36 @@ int eph_cli_handshake(int sockfd, struct sockaddr_in *servaddr, char *serv_ip){
     char cmd[MAXLINE];
     strcat(cmd, "REQ");
     
-    Sendto(sockfd, cmd, strlen(cmd), 0, (SA *)servaddr, servlen);
     char eph_port[MAXLINE];
 
-    //TODO Insert Timeout here 
-    int n = Recvfrom(sockfd, eph_port, MAXLINE, 0, NULL, NULL);
-    eph_port[n] = 0;
+    int attempt = 1;
+    struct timeval tv;
 
-    printf("port recieved: %s", eph_port);
- 
+eph_recv:
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    Sendto(sockfd, cmd, strlen(cmd), 0, (SA *)servaddr, servlen);
+    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int n = recvfrom(sockfd, eph_port, MAXLINE, 0, NULL, NULL);
+    if (n < 0){
+        if (errno == EWOULDBLOCK) {
+            attempt++;
+            if (attempt > 5)
+                err_sys("Could not communicate with server");
+            fprintf(stderr, "Recvfrom socket timeout. Retrying attempt %d\n", attempt);
+            goto eph_recv;
+        } else
+            err_sys("Receiving eph port err while attempting handshake\n");
+
+    }
+    else
+        eph_port[n] = 0;
+
+//  Disable Timeout
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    
     int ephsock = Socket(AF_INET, SOCK_DGRAM, 0);
     
     bzero(servaddr, sizeof(*servaddr));
