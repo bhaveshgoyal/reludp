@@ -6,9 +6,13 @@
 #define RTT_DEBUG
 #define MAX_WSIZE 1024
 #define SHARED_PATH "./"
+#define FTRANS_TTH 3 //ssth
+#define ADDI_PAR 4
+#define MULTD_FACT 0.5
+#define SSTH 0
 
 int srv_window[MAX_WSIZE]; //1024
-int curr_wsize = 4;
+int curr_wsize = 2; //cwnd
 int curr_woffset = 0;
 
 typedef struct buf_entry{
@@ -21,14 +25,22 @@ static buf_entry send_buf[MAX_WSIZE];
 static struct rtt_info rttinfo;
 static int rttinit = 0;
 static struct msghdr msgsend, msgrecv; /* assumed init to 0 */
-static struct hdr {
+
+static struct pkt_hdr {
     uint32_t seq;
     uint32_t ts; // timestamp
     uint32_t cuml_ack;
     uint32_t adv;
     uint32_t last;
 }sendhdr, recvhdr;
+/*
+const int DGRAM_SIZE = 512 - sizeof(struct pkt_hdr);
 
+struct packet {
+    struct pkt_hdr hdr;
+    char body[DGRAM_SIZE];
+}
+*/
 static void sig_alrm(int signo);
 static sigjmp_buf jmpbuf;
 
@@ -123,7 +135,7 @@ int recv_cmdfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen, char *recvli
     msgrecv.msg_iov = iovrecv;
     msgrecv.msg_iovlen = 2;
     iovrecv[0].iov_base = &recvhdr;
-    iovrecv[0].iov_len = sizeof(struct hdr);
+    iovrecv[0].iov_len = sizeof(struct pkt_hdr);
     iovrecv[1].iov_base = recvline;
     iovrecv[1].iov_len = MAXLINE;
  //       do{
@@ -145,7 +157,7 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     msgrecv.msg_iov = iovrecv;
     msgrecv.msg_iovlen = 2;
     iovrecv[0].iov_base = &recvhdr;
-    iovrecv[0].iov_len = sizeof(struct hdr);
+    iovrecv[0].iov_len = sizeof(struct pkt_hdr);
     iovrecv[1].iov_base = recvline;
     iovrecv[1].iov_len = MAXLINE;
     
@@ -157,30 +169,42 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     int wsize_cli = recvhdr.adv;
     printf("Acked Till %d. Curr Window: %d. Slide window Offset %d\n", acked, curr_wsize, get_woffset());
     if (recvhdr.last == 1){
-        alarm(0);
-        rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
+//        alarm(0);
+//        rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
+        printf("Clearing up headers. Fin done\n");
+        fflush(stdout);
         clear_up();    
         return;
     }
-    if (acked < get_woffset()){ //Resend the next to last received seq by client
-        printf("Resending frame %d Data: %s\n", acked, send_buf[acked].data);
-        send_to_cli(sockfd, send_buf[acked].data, strlen(send_buf[acked].data), acked, cliaddr, cliaddrlen, 1);
+    if (acked < get_woffset() || curr_woffset < recvhdr.adv || curr_wsize >= SSTH){ //Resend the next to last received seq by client
+        curr_wsize *= MULTD_FACT;
+    }// Reduce Window Size
+        
+    if (acked < get_woffset()){
+        if (srv_window[acked] > FTRANS_TTH){ //Fast Retransmit
+            printf("Resending frame %d Data: %s\n", acked, send_buf[acked].data);
+            send_to_cli(sockfd, send_buf[acked].data, strlen(send_buf[acked].data), acked, cliaddr, cliaddrlen, 1);
+        }
+        else
+            srv_window[acked]++;
     }
-    else if (acked == curr_wsize) { //Everything in current window received
+    else if (acked == get_woffset()) { //Everything in current window received
         if (curr_wsize*2 > MAX_WSIZE)
             printf("Max Window Size Reached for Server\n");
-        else
-            curr_wsize <<= 2;
+        else{
+            curr_wsize += ADDI_PAR;
+            printf("Window size increased to %d\n", curr_wsize);
+        }
     }
-    else{
+    else if (acked > get_woffset()){
         printf("Oh Snap! Ack Greater than current window Ack %d wsize %d\n", acked, get_woffset());
     }
 
     fflush(stdout);
-    alarm(0);
-    rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
+//    alarm(0);
+//    rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
 }
-
+/*
 int recv_from_cli(int sockfd, char *recvline, SA *cliaddr, socklen_t cliaddrlen){
     struct iovec iovrecv[2];
     msgrecv.msg_name = cliaddr;
@@ -201,38 +225,59 @@ int recv_from_cli(int sockfd, char *recvline, SA *cliaddr, socklen_t cliaddrlen)
     alarm(0);
     rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
 }
-
+*/
 int send_to_cli(int sockfd, char *resp, int resplen, int seq, SA *cliaddr, socklen_t cliaddrlen, int timer){
+
+    struct timeval      timeout;
+
     struct iovec iovsend[2];
-    sendhdr.seq = seq;
-    msgsend.msg_name = cliaddr;
-    msgsend.msg_namelen = cliaddrlen;
-    msgsend.msg_iov = iovsend;
-    msgsend.msg_iovlen = 2;
-    iovsend[0].iov_base = &sendhdr;
-    iovsend[0].iov_len = sizeof(struct hdr);
-    iovsend[1].iov_base = resp;
-    iovsend[1].iov_len = resplen;
+    //    Signal(SIGALRM, sig_alrm);
+    fd_set      readfs;
+    while(1){
 
-    Signal(SIGALRM, sig_alrm);
-    rtt_newpack(&rttinfo);
-sendagain:
-    sendhdr.ts = rtt_ts(&rttinfo);
-    sendmsg(sockfd, &msgsend, 0);
-    if (timer == 1){
+        rtt_newpack(&rttinfo);
+        
+        msgsend.msg_name = cliaddr;
+        msgsend.msg_namelen = cliaddrlen;
+        msgsend.msg_iov = iovsend;
+        msgsend.msg_iovlen = 2;
+        iovsend[0].iov_base = &sendhdr;
+        iovsend[0].iov_len = sizeof(struct pkt_hdr);
+        iovsend[1].iov_base = resp;
+        iovsend[1].iov_len = resplen;
+        
+        sendhdr.seq = seq;
+        sendhdr.ts = rtt_ts(&rttinfo);
+        
+        sendmsg(sockfd, &msgsend, 0);
+        
+        timeout.tv_sec = rttinfo.rtt_rto;
+        timeout.tv_usec = rttinfo.rtt_rto*1000000;
+        
+        FD_ZERO(&readfs);
+        FD_SET(sockfd, &readfs);
         printf("\nTimer INIT, RTO: %lf\n", rttinfo.rtt_rto);
-        fflush(stdout);
-        alarm(rtt_start(&rttinfo));
+        int status = select(sockfd + 1, &readfs, NULL, NULL, &timeout);
+        if (status < 0) {
+            printf("\nStatus = %d, Unable to monitor sockets !!! Exiting ...",status);
+            return 0;
+        }
 
-        if (sigsetjmp(jmpbuf, 1) != 0) {
+        if (FD_ISSET(sockfd, &readfs)){
+            rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
+            recv_ackfrom_cli(sockfd, cliaddr, cliaddrlen);
+            break;
+        }
+        else{
             if (rtt_timeout(&rttinfo) < 0) {
                 err_msg("dg_send_recv: no response from server, giving up");
                 rttinit = 0;
                 errno = ETIMEDOUT;
-                return (-1);
+                curr_wsize *= MULTD_FACT;
+                return (0);
             }
-            goto sendagain;
         }
+
     }
 
 }
@@ -242,8 +287,6 @@ int main(int argc, char **argv){
     struct sockaddr_in *servaddr, cliaddr;
     struct ifi_info *ifi, *ifihead;
 
- //   struct sockaddr_in *sa;
-//    ifihead = Get_ifi_info(AF_INET, 1);
     for (ifihead = ifi = Get_ifi_info(AF_INET, 1); ifi != NULL;ifi=ifi->ifi_next){
     sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
     
@@ -258,14 +301,7 @@ int main(int argc, char **argv){
     printf("Server bound at interface %s\n", Sock_ntop((SA *) servaddr, sizeof(*servaddr)));
     
     }
-    /*
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port = htons(SERV_PORT);
-
-    Bind(sockfd, (SA *) &servaddr, sizeof(servaddr));
-    */
+    
     int len = sizeof(cliaddr);
 
     char msg[MAXLINE];
@@ -321,16 +357,14 @@ int main(int argc, char **argv){
                         pDirent = readdir(p_dir);
                         int last = 0;
                         while (pDirent != NULL) {
+                            
                             struct dirent *nextDirent = readdir(p_dir);
                             if (nextDirent == NULL){
                                 sendhdr.last = 1;
-                        //        printf("last %d ", last);
-                         //       printf("Last File\n");
                             }
                             else
                                 sendhdr.last = 0;
-                    //            last = 0;
-                   //         }
+                            
                             srv_window[sent_frames] = 1;
                             send_buf[sent_frames].sent = 1;
                             memset(resp, 0, MAXLINE); 
@@ -338,19 +372,19 @@ int main(int argc, char **argv){
                             strcpy(send_buf[sent_frames].data, strcat(pDirent->d_name, ""));
 
                             printf("Sending: %s Index %d w_size %d %d\n", resp, sent_frames, curr_wsize, last);
-                            if (sent_frames == curr_wsize-1)
-                                send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 1);
-                            else
-                                send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 0);
+                            //                      if (sent_frames >= curr_wsize-1)
+                            send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 1);
+                            //                     else
+                            //                       send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 0);
 
-                            if (sent_frames >= curr_wsize-1)
-                                recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
+               //             if (sent_frames >= curr_wsize-1 || sent_frames >= recvhdr.adv-1 || nextDirent == NULL)
+               //                 recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
                             sent_frames++;
                             pDirent = nextDirent;
                         }
-                        recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
-                        
-                        
+                        //         recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
+
+
                         closedir (p_dir);
                     }
                 }
@@ -373,7 +407,7 @@ int main(int argc, char **argv){
                     int n;
                     while ((n = read(fd, file_buf, MAXLINE)) > 0) {
                         iovsend[0].iov_base = &sendhdr;
-                        iovsend[0].iov_len = sizeof(struct hdr);
+                        iovsend[0].iov_len = sizeof(struct pkt_hdr);
                         iovsend[1].iov_base = file_buf;
                         iovsend[1].iov_len = n;
                         sendmsg(eph_sock, &msgsend, 0);

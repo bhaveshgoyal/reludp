@@ -2,6 +2,9 @@
 #include "unprtt.h"
 #include <setjmp.h>
 
+#define seed 41
+#define delay 20
+#define PROB_LOSS 0.2
 #define RTT_DEBUG
 #define MAX_WSIZE 1024
 int recv_window[MAX_WSIZE];
@@ -27,7 +30,17 @@ static struct hdr {
 
 } sendhdr, recvhdr;
 
+int calc_drop_prob(){
+    double prob = rand()/(double)RAND_MAX;
+    printf("PACKET PROB: %lf %lf", prob, PROB_LOSS);
+    if (prob < PROB_LOSS){
+    printf(" Dropping Packet\n");
+        return 1;
+    }
+    return 0;
+//    return ((srand(seed)/(double)RAND_MAX) < PROB_LOSS) ? 0 : 1;
 
+}
 static void sig_alrm(int signo);
 static sigjmp_buf jmpbuf;
 
@@ -39,6 +52,7 @@ static void sig_alrm(int signo)
 
 void clear_up(){
     int i;
+    srand(seed);
     for(i = 0; i < MAX_WSIZE; i++){
         recv_window[i] = 0;
         recv_buf[i].recvd = 0;
@@ -181,13 +195,17 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     int n = 0;
     do{
         n = recvmsg(sockfd, &msgrecv, 0);
-        printf("%s\n", recvline);
-  //      printf("\nReceiving %s %d %d %d %d %d\n", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, curr_wsize, recvhdr.last);
+        printf("Received %s ", recvline);
+        //      printf("\nReceiving %s %d %d %d %d %d\n", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, curr_wsize, recvhdr.last);
         fflush(stdout);
         memset(recvline, 0, sizeof(recvline));
     } while (n < sizeof(struct hdr));
-    
+
+    if (calc_drop_prob() == 1)
+        return;
+
     if (cmdacked == 0){ //First Reply from server. Acts as ACK for command
+        cmdacked = 1;
         alarm(0);
         rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
     }
@@ -195,22 +213,25 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     recv_window[recvhdr.seq] = 1;
     int unacked = get_unacked();
 
-    if (recvhdr.last == 1 || unacked < recvhdr.seq || (((recvhdr.seq+1) % curr_wsize) == 0)){
-        if (recvhdr.last == 1){
-            sendhdr.last = 1;
-        }
-        if (((recvhdr.seq+1) % curr_wsize) == 0){
-            if (curr_wsize > MAX_WSIZE){
-                printf("Max Window Size Reached");
-                fflush(stdout);
-            }
-            else{
-               printf("Doubling window size");
-                curr_wsize <<= 2;
-            }
-        }
-        send_ackto_srv(sockfd, servaddr, servaddrlen);
+    //    if (unacked < recvhdr.seq || recvhdr.seq+1 == curr_wsize){
+    if (recvhdr.last == 1){
+        sendhdr.last = 1;
     }
+    send_ackto_srv(sockfd, servaddr, servaddrlen);
+    //    }
+    /*    else if (recvhdr.seq+1 == curr_wsize){
+          if (curr_wsize + get_unacked() > MAX_WSIZE){
+          printf("Max Window Size Reached");
+          fflush(stdout);
+          }
+          else{
+          printf("Shifting client window to %d", curr_wsize + get_unacked());
+          curr_wsize += get_unacked();
+          }
+          send_ackto_srv(sockfd, servaddr, servaddrlen);
+
+          }
+          */  
     if (recvhdr.last == 1)
         clear_up();
 }
@@ -251,29 +272,9 @@ int main(int argc, char **argv){
         if (FD_ISSET(sockfd, &readfs)){
  //           printf("Select called: ");
  //           fflush(stdout);
-            /*
-            struct iovec iovrecv[2];
-            msgrecv.msg_name = NULL;
-            msgrecv.msg_namelen = 0;
-            msgrecv.msg_iov = iovrecv;
-            msgrecv.msg_iovlen = 2;
-            iovrecv[0].iov_base = &recvhdr;
-            iovrecv[0].iov_len = sizeof(struct hdr);
-            iovrecv[1].iov_base = recvline;
-            iovrecv[1].iov_len = MAXLINE;
-            int n = 0;
+ //
             
-            do{
-                n = recvmsg(sockfd, &msgrecv, 0);
-        printf("recieving %s %d %d %d %d", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, sendhdr.seq);
-        fflush(stdout);
-            } while (n < sizeof(struct hdr) || recvhdr.seq != sendhdr.seq);
-            alarm(0);
-            rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
-  */              
-            recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
-            if (cmdacked == 0)
-                cmdacked = 1;
+       recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
 //            int n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
 //            recvline[n] = 0;
             Fputs(recvline, stdout);
