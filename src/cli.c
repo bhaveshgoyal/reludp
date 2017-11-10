@@ -1,10 +1,9 @@
 #include "unp.h"
 #include "unprtt.h"
 #include <setjmp.h>
-
 #define seed 41
 #define delay 20
-#define PROB_LOSS 0.2
+#define PROB_LOSS 0.5
 #define RTT_DEBUG
 #define MAX_WSIZE 1024
 int recv_window[MAX_WSIZE];
@@ -119,11 +118,12 @@ eph_recv:
     return ephsock;
 
 }
-int send_ackto_srv(int sockfd, SA *servaddr, socklen_t servaddrlen){
+int send_ackto_srv(int sockfd, SA *servaddr, socklen_t servaddrlen, int recv_seq){
 
     struct iovec iovsend[1];
     sendhdr.cuml_ack = get_unacked();
     sendhdr.adv = curr_wsize;
+    sendhdr.seq = recv_seq;
     msgsend.msg_name = servaddr;
     msgsend.msg_namelen = servaddrlen;
     msgsend.msg_iov = iovsend;
@@ -200,7 +200,6 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
         fflush(stdout);
         memset(recvline, 0, sizeof(recvline));
     } while (n < sizeof(struct hdr));
-
     if (calc_drop_prob() == 1)
         return;
 
@@ -217,7 +216,7 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     if (recvhdr.last == 1){
         sendhdr.last = 1;
     }
-    send_ackto_srv(sockfd, servaddr, servaddrlen);
+    send_ackto_srv(sockfd, servaddr, servaddrlen, recvhdr.seq);
     //    }
     /*    else if (recvhdr.seq+1 == curr_wsize){
           if (curr_wsize + get_unacked() > MAX_WSIZE){
@@ -232,8 +231,8 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
 
           }
           */  
-    if (recvhdr.last == 1)
-        clear_up();
+//    if (recvhdr.last == 1)
+//        clear_up();
 }
 int main(int argc, char **argv){
     int sockfd;
@@ -246,7 +245,8 @@ int main(int argc, char **argv){
     Inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
     sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
 
-
+    //Create REad Thread;
+    //
     char sendline[MAXLINE], recvline[MAXLINE];
     int servlen = sizeof(servaddr);
 
