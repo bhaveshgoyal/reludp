@@ -1,12 +1,17 @@
 #include "unp.h"
 #include "unprtt.h"
+#include <math.h>
 #include <setjmp.h>
-#define seed 41
-#define delay 20
-#define PROB_LOSS 0.5
 #define RTT_DEBUG
-#define MAX_WSIZE 1024
 #define SHARED_PATH "./"
+
+static char SERVER_IP[MAXLINE];
+static int SERVER_PORT = 9877;
+static int seed = 41;
+static float PROB_LOSS = 0.2;
+static int MAX_WSIZE = 1024;
+static int delay = 20;
+
 int curr_wsize = 4;
 
 int last_pktidx = -1;
@@ -18,8 +23,7 @@ typedef struct buf_entry{
 
 }buf_entry;
 
-static buf_entry recv_buf[MAX_WSIZE];
-
+static buf_entry *recv_buf;
 static struct rtt_info rttinfo;
 static int rttinit = 0;
 static struct msghdr msgsend, msgrecv; /* assumed init to 0 */
@@ -100,6 +104,8 @@ void *read_buf(void* out_fds){
             close(fds);
         break;
     }
+    float random = ((float)rand()/RAND_MAX);
+    float sleep_time = pow(M_E, (-1*delay*log(random)));
     sleep(5);
     }
 }
@@ -288,11 +294,16 @@ int main(int argc, char **argv){
     int sockfd;
     struct sockaddr_in servaddr;
 
+    if (fileiocli("client.in") == 0){
+        fprintf(stderr, "error: Not able to read config file client.in");
+        exit(0);
+    }
+    recv_buf = (buf_entry *)malloc(sizeof(buf_entry)*MAX_WSIZE);
     bzero(&servaddr, sizeof(servaddr));
     
     servaddr.sin_family = AF_INET;
-    servaddr.sin_port = htons(SERV_PORT);
-    Inet_pton(AF_INET, argv[1], &servaddr.sin_addr);
+    servaddr.sin_port = htons(SERVER_PORT);
+    Inet_pton(AF_INET, SERVER_IP, &servaddr.sin_addr);
     sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
 
     //Create REad Thread;
@@ -308,6 +319,8 @@ int main(int argc, char **argv){
     fflush(stdout);
     static int cmdacked = 0;
     clear_up();
+    
+    int out_des = 1;
 
     while(1){ 
         FD_ZERO(&readfs);
@@ -320,15 +333,15 @@ int main(int argc, char **argv){
             continue;
         }
         if (FD_ISSET(sockfd, &readfs)){
- //           printf("Select called: ");
- //           fflush(stdout);
- //
-            
-       recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
-//            int n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
-//            recvline[n] = 0;
-       Fputs(recvline, stdout);
-       fflush(stdout);
+            //           printf("Select called: ");
+            //           fflush(stdout);
+            //
+
+            recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
+            //            int n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
+            //            recvline[n] = 0;
+            Fputs(recvline, stdout);
+            fflush(stdout);
        memset(recvline, 0, sizeof(recvline));
         }
         else if (FD_ISSET(STDIN_FILENO, &readfs)){
@@ -338,8 +351,16 @@ int main(int argc, char **argv){
                     fflush(stdout);
                     continue;
                 }
+                if (strstr(sendline, "quit\n")){
+                    printf("Closing all open sockets and terminating threads. Bye!\n");
+                    fflush(stdout);
+                    close(sockfd);
+                    clear_up();
+                    exit(0);
+                
+                }
                 if (eph_port_recv == 0){
-                    if ((sockfd = eph_cli_handshake(sockfd, &servaddr , argv[1])) > 0){
+                    if ((sockfd = eph_cli_handshake(sockfd, &servaddr , SERVER_IP)) > 0){
                         eph_port_recv = 1;
                     }
                     else{
@@ -349,7 +370,6 @@ int main(int argc, char **argv){
                 }
 
                 cmdacked = 0;
-                int out_des = 1;
                 if (strstr(sendline, ">")){
                     char copy_cmd[MAXLINE];
                     strcpy(copy_cmd, sendline);
@@ -392,4 +412,53 @@ int main(int argc, char **argv){
         }
     }
     return 0;
+}
+int fileiocli(char *fname){
+
+  FILE *confd = fopen(fname, "r");
+
+  if (confd == NULL){
+    return 0;
+  }
+
+    char buf[MAXLINE];
+    int lineIdx = 0;
+    printf("\n=============================");
+    printf("\nLoading server configuration:\n");
+    while (fgets(buf, MAXLINE, confd) != NULL) {
+
+        if (lineIdx == 0){
+            buf[strlen(buf)-1] = 0;
+            strcpy(SERVER_IP, buf);
+            printf("Server IP: %s\n", SERVER_IP);
+        }
+        else if (lineIdx == 1){
+            buf[strlen(buf)-1] = 0;
+            SERVER_PORT = atoi(buf);
+            printf("Server Port: %d\n", SERVER_PORT);
+        }
+        else if (lineIdx == 2){
+            buf[strlen(buf)-1] = 0;
+            seed = atoi(buf);
+            printf("srand seed: %d\n", seed);
+        }
+        else if (lineIdx == 3){
+            buf[strlen(buf)-1] = 0;
+            PROB_LOSS = atof(buf);
+            printf("Loss Probability: %lf\n", PROB_LOSS);
+        }
+        else if (lineIdx == 4){
+            buf[strlen(buf)-1] = 0;
+            MAX_WSIZE = atoi(buf);
+            printf("Max Window Size: %d\n", MAX_WSIZE);
+        }
+        else if (lineIdx == 5){
+            buf[strlen(buf)-1] = 0;
+            delay = atoi(buf);
+            printf("Delay in ms: %d\n", delay);
+        }
+        lineIdx++;
+    }
+    printf("=============================\n\n");
+return 1;
 }

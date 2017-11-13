@@ -6,15 +6,16 @@
 #include <stdlib.h>
 #include <setjmp.h>
 #define RTT_DEBUG
-#define MAX_WSIZE 1024
-#define SHARED_PATH "./"
+//#define MAX_WSIZE 1024
+//#define SHARED_PATH "./"
 #define FTRANS_TTH 2 //ssth
 #define ADDI_PAR 4
 #define MULTD_FACT 0.5
 #define SSTH 0
 
-//char SHARED_PATH[1024];
-//int MAX_WSIZE = 0;
+static char SHARED_PATH[MAXLINE];
+static int MAX_WSIZE = 1024;
+static int SERVER_PORT = 9877;
 
 static int curr_wsize = 4; //cwnd
 static int frame_burst = 0;
@@ -28,7 +29,7 @@ typedef struct buf_entry{
     struct rtt_info rttinfo;
 }buf_entry;
 
-static buf_entry send_buf[MAX_WSIZE];
+static buf_entry *send_buf;
 
 static struct rtt_info rttinfo;
 static int rttinit = 0;
@@ -53,7 +54,7 @@ typedef struct t_args {
 
 }t_args;
 
-int volatile cuml_buf[MAX_WSIZE];
+int volatile *cuml_buf;
 /*
 const int DGRAM_SIZE = 512 - sizeof(struct pkt_hdr);
 
@@ -324,7 +325,7 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     }
     
     if (acked != get_woffset()){
-    printf("\n***Init Timer from recv at seq %d***\n", recvhdr.cuml_ack);
+    printf("\n***Init Retransmission Timer at seq %d***\n", recvhdr.cuml_ack);
     fflush(stdout);
     timer_running = 1;
     t_args *connParams = (t_args *)malloc(sizeof(t_args));
@@ -429,7 +430,13 @@ int main(int argc, char **argv){
     struct sockaddr_in *servaddr, cliaddr;
     struct ifi_info *ifi, *ifihead;
 
-//    fileio("server.in");
+    if (fileio("./server.in") == 0){
+        fprintf(stderr, "error: Not able to read config file server.in");
+        exit(0);
+    }
+
+    send_buf = (buf_entry *)malloc(sizeof(buf_entry)*MAX_WSIZE);
+    cuml_buf = (int *)malloc(sizeof(int)*MAX_WSIZE);
 
     for (ifihead = ifi = Get_ifi_info(AF_INET, 1); ifi != NULL;ifi=ifi->ifi_next){
     sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
@@ -439,7 +446,7 @@ int main(int argc, char **argv){
     bzero(&servaddr, sizeof(servaddr));
     servaddr = (struct sockaddr_in *) ifi->ifi_addr;
     servaddr->sin_family = AF_INET;
-    servaddr->sin_port = htons(SERV_PORT);
+    servaddr->sin_port = htons(SERVER_PORT);
     Bind(sockfd, (SA *) servaddr, sizeof(*servaddr));
 
     printf("Server bound at interface %s\n", Sock_ntop((SA *) servaddr, sizeof(*servaddr)));
@@ -486,7 +493,7 @@ int main(int argc, char **argv){
                 recv_cmdfrom_cli(eph_sock, (SA *)&cliaddr, len, command);
                 clear_up();
                 if (strstr(command, "list")){
-                    printf("List command issued\n");
+                    printf("List command issued. Reading from %s\n", SHARED_PATH);
                     fflush(stdout);
                     DIR *p_dir = opendir(SHARED_PATH);
                     char resp[MAXLINE] = {0};
@@ -543,6 +550,7 @@ int main(int argc, char **argv){
                         fflush(stdout);
                         frame_burst = 0;
                     }
+                    printf("Outside while %d %d", get_cumloffset(), get_woffset());
                     clear_up();    
                 }
                 else if (strstr(command, "download")){
@@ -617,9 +625,10 @@ int main(int argc, char **argv){
                     }
                     clear_up();    
                 }
-                else
-                    send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len);
-                //    Sendto(eph_sock, command, n, 0, (SA *)&cliaddr, len);
+         //       else{
+         //           send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len);
+          //      }
+                    //    Sendto(eph_sock, command, n, 0, (SA *)&cliaddr, len);
                 memset(command, 0, sizeof(command));
             }
         }
@@ -628,27 +637,37 @@ int main(int argc, char **argv){
 
     return 0;
 }
-/*int fileio(char *fname){
+int fileio(char *fname){
 
   FILE *confd = fopen(fname, "r");
+
+  if (confd == NULL){
+    return 0;
+  }
     char buf[MAXLINE];
-    char port[MAXLINE];
 
-    char **lines = malloc(sizeof(*lines) * alloc_size);
-    
     int lineIdx = 0;
-
-    while (fgets(buf, sizeof(buf), confd) != NULL) {
+    printf("\n=============================");
+    printf("\nLoading server configuration:\n");
+    while (fgets(buf, MAXLINE, confd) != NULL) {
         
         if (lineIdx == 0){
-            port = atoi(buf);
+            buf[strlen(buf)-1] = 0;
+            SERVER_PORT = atoi(buf);
+            printf("Server Port: %d\n", SERVER_PORT);
         }
         else if (lineIdx == 1){
+            buf[strlen(buf)-1] = 0;
             MAX_WSIZE = atoi(buf);
+            printf("Window Size: %d\n", MAX_WSIZE);
         }
         else if (lineIdx == 2){
+            buf[strlen(buf)-1] = 0;
             strcpy(SHARED_PATH, buf);
+            printf("Shared Path: %s\n", SHARED_PATH);
         }
         lineIdx++;
     }
-}*/
+    printf("=============================\n\n");
+return 1;
+}
