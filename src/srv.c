@@ -17,8 +17,7 @@
 //int MAX_WSIZE = 0;
 
 static int curr_wsize = 4; //cwnd
-static int frame_burst = 1;
-static int winc_val = 0;
+static int frame_burst = 0;
 
 static int timer_running = 0;
 
@@ -54,7 +53,7 @@ typedef struct t_args {
 
 }t_args;
 
-int cuml_buf[MAX_WSIZE];
+int volatile cuml_buf[MAX_WSIZE];
 /*
 const int DGRAM_SIZE = 512 - sizeof(struct pkt_hdr);
 
@@ -66,13 +65,21 @@ struct packet {
 static void sig_alrm(int signo);
 static sigjmp_buf jmpbuf;
 
+void clear_cumlbuf(){
+    int i = 0;
+    for(i = 0; i < MAX_WSIZE; i++){
+        cuml_buf[i] = 0;
+    }
+}
 void clear_up(){
     int i = 0;
     for(i = 0;i < MAX_WSIZE; i++){
-        send_buf[i].sent = 0;
-        memset(send_buf[i].data, 0, MAX_WSIZE);
+        memset(&send_buf[i], 0, sizeof(send_buf[i]));
     }
     curr_wsize = 4;
+    clear_cumlbuf();
+    timer_running = 0;
+    frame_burst = 0;
     memset(&sendhdr, 0, sizeof(sendhdr));
     memset(&recvhdr, 0, sizeof(recvhdr));
 }
@@ -82,7 +89,7 @@ int get_frameburst(){
 int get_wsize(){
     return curr_wsize;
 }
-int get_woffset(){
+int volatile get_woffset(){
     int i = 0;
     for(i = 0; i < MAX_WSIZE; i++){
         if (send_buf[i].sent == 0)
@@ -90,8 +97,8 @@ int get_woffset(){
     }
 
 }
-int get_cumloffset(){
-    int i = 0;
+int volatile get_cumloffset(){
+    int volatile i = 0;
     for(i = 0; i < MAX_WSIZE; i++){
         if (cuml_buf[i] == 0)
             return i;
@@ -99,10 +106,10 @@ int get_cumloffset(){
 
 }
 
-int set_cumloffset(int offset){
-    int i = 0;
-    for(i = 0; i < offset; i++){
-        cuml_buf[i] == 1;
+int volatile set_cumloffset(int offset){
+    int volatile seti = 0;
+    for(seti = 0; seti <= offset; seti++){
+        cuml_buf[seti] = 1;
     }
 
 }
@@ -184,7 +191,6 @@ void *recv_handler(void *connParams){
     printf("Thread seq:  %d %s %d %d\n", sockfd, resp, resplen, (*(args)).seq);
     fflush(stdout);
     struct iovec iovsend[2];
-    struct rtt_info seqrttinfo = send_buf[seq].rttinfo;
     iovsend[0].iov_base = &sendhdr;
     iovsend[0].iov_len = sizeof(struct pkt_hdr);
     iovsend[1].iov_base = resp;
@@ -193,7 +199,7 @@ void *recv_handler(void *connParams){
     while(1){
 
         FD_SET(sockfd, &readfs);
-        printf("\nTimer INIT for: %d, RTO: %lf\n", seq, send_buf[seq].rttinfo.rtt_rto);
+        printf("\nRetransmission Timer Started for seq: %d, RTO: %lf\n", seq, rttinfo.rtt_rto);
         int status = select(sockfd + 1, &readfs, NULL, NULL, &timeout);
         if (status < 0) {
             printf("\nStatus = %d, Unable to monitor sockets !!! Exiting ...",status);
@@ -206,7 +212,7 @@ void *recv_handler(void *connParams){
         }
         else{ //Retransmit Packet. Timeout Occured
             if (rtt_timeout(&(send_buf[seq].rttinfo)) < 0) {
-                err_msg("dg_send_recv: no response from server, giving up");
+                err_msg("Transmission Retry Limit reached: no response from Client. Giving up");
                 rttinit = 0;
                 errno = ETIMEDOUT;
                 curr_wsize *= MULTD_FACT;
@@ -226,9 +232,9 @@ void *recv_handler(void *connParams){
             sendhdr.ts = rtt_ts(&(send_buf[seq].rttinfo));
             if (sendmsg(sockfd, &msgsend, 0) < 0)
                 printf("Could not Send PACKET %d %s\n", sockfd, strerror(errno));
-
-            timeout.tv_sec = send_buf[seq].rttinfo.rtt_rto;
-            timeout.tv_usec = send_buf[seq].rttinfo.rtt_rto*1000000;
+            rttinfo.rtt_rto = send_buf[seq].rttinfo.rtt_rto;
+            timeout.tv_sec = rttinfo.rtt_rto;
+            timeout.tv_usec = rttinfo.rtt_rto*1000000;
         }
 
     }
@@ -275,8 +281,8 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
         n = recvmsg(sockfd, &msgrecv, 0);
     }while(n < sizeof(struct pkt_hdr));
 
-    rtt_stop(&rttinfo, rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
     rtt_stop(&(send_buf[recvhdr.seq].rttinfo), rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
+    rtt_stop(&rttinfo, rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
     
 //    timer_running = 0;
     int acked = recvhdr.cuml_ack;
@@ -289,8 +295,7 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
 //        rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
         printf("Clearing up headers. Fin done\n");
         fflush(stdout);
-//        clear_up();    
-        return;
+//        return;
     }
 //    if (acked < get_woffset() || curr_wsize > recvhdr.adv){ //Resend the next to last received seq by client
 //        curr_wsize *= MULTD_FACT;
@@ -301,7 +306,7 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     if (acked < get_woffset()){
         if (send_buf[acked].sent > FTRANS_TTH){ //Fast Retransmit
             printf("Resending frame %d Data: %s\n", acked, send_buf[acked].data);
-            send_to_cli(sockfd, send_buf[acked].data, strlen(send_buf[acked].data), acked, cliaddr, cliaddrlen, 1);
+//            send_to_cli(sockfd, send_buf[acked].data, strlen(send_buf[acked].data), acked, cliaddr, cliaddrlen, 1);
         }
         else
             send_buf[acked].sent++;
@@ -311,7 +316,6 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
             printf("Max Window Size Reached for Server\n");
         else{
             curr_wsize += ADDI_PAR;
-            winc_val = ADDI_PAR;
             printf("Window size increased to %d\n", curr_wsize);
         }
     }
@@ -320,7 +324,7 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     }
     
     if (acked != get_woffset()){
-    printf("Init Timer from recv at seq %d\n", recvhdr.cuml_ack);
+    printf("\n***Init Timer from recv at seq %d***\n", recvhdr.cuml_ack);
     fflush(stdout);
     timer_running = 1;
     t_args *connParams = (t_args *)malloc(sizeof(t_args));
@@ -335,8 +339,8 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     connParams->cliaddlen = cliaddrlen;
     printf("SEQUENCE HEADER: %d\n", recvhdr.cuml_ack);
     connParams->seq = recvhdr.cuml_ack;
-    connParams->resp = send_buf[recvhdr.cuml_ack-1].data;
-    connParams->resplen = strlen(send_buf[recvhdr.cuml_ack-1].data);
+    connParams->resp = send_buf[recvhdr.cuml_ack].data;
+    connParams->resplen = strlen(send_buf[recvhdr.cuml_ack].data);
     pthread_t tid;
     if (pthread_create(&tid, NULL, (void *)recv_handler, (void*)connParams) != 0){
         err_sys("Could not create server Thread. Abort\n");
@@ -369,13 +373,14 @@ int recv_from_cli(int sockfd, char *recvline, SA *cliaddr, socklen_t cliaddrlen)
         rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
         }
         */
-int send_to_cli(int sockfd, char *resp, int resplen, int seq, SA *cliaddr, socklen_t cliaddrlen, int timer){
+int send_to_cli(int sockfd, char *resp, int resplen, int seq, SA *cliaddr, socklen_t cliaddrlen){
 
     struct timeval  timeout;
 
     struct iovec iovsend[2];
 
     rtt_newpack(&(send_buf[seq].rttinfo));
+//    rtt_newpack(&rttinfo);
 
     msgsend.msg_name = cliaddr;
     msgsend.msg_namelen = cliaddrlen;
@@ -476,97 +481,144 @@ int main(int argc, char **argv){
             }
 
             while(1){
-                printf("\nWaiting to recv\n");
+                printf("\nWaiting for Client Command\n");
                 fflush(stdout);
                 recv_cmdfrom_cli(eph_sock, (SA *)&cliaddr, len, command);
                 clear_up();
                 if (strstr(command, "list")){
-                    printf("list issued");
+                    printf("List command issued\n");
                     fflush(stdout);
                     DIR *p_dir = opendir(SHARED_PATH);
                     char resp[MAXLINE] = {0};
+                    frame_burst = 0;
+                    int sent_frames = 0;
+                    int last = 0;
+                    rtt_init(&rttinfo);
                     if (p_dir == NULL){
                         strcpy(resp, "Can't open present directory for reading");
                         fprintf(stderr, "%s", resp);
-                        Sendto(eph_sock, resp, strlen(resp), 0, (SA *)&cliaddr, len);
+                        sendhdr.last = 0;
+                        send_buf[sent_frames].sent = 1;
+                        strcpy(send_buf[sent_frames].data, resp);
+                        rtt_init(&(send_buf[sent_frames].rttinfo));
+                        send_to_cli(eph_sock, resp, strlen(resp), 0, (SA *)&cliaddr, len);
                     }
                     else{
                         struct dirent *pDirent;
-                        int sent_frames = 0;
                         pDirent = readdir(p_dir);
-                        int last = 0;
                         while (pDirent != NULL) {
-                            
+
                             struct dirent *nextDirent = readdir(p_dir);
-                            if (nextDirent == NULL){
-                                sendhdr.last = 1;
-                            }
+                            if (nextDirent == NULL)
+                                sendhdr.last = sent_frames;
                             else
-                                sendhdr.last = 0;
-                            
+                                sendhdr.last = -1;
                             
                             send_buf[sent_frames].sent = 1;
                             memset(resp, 0, MAXLINE); 
-                            strcpy(resp, strcat(pDirent->d_name, ""));
+                            strcpy(resp, strcat(pDirent->d_name, "\n"));
                             strcpy(send_buf[sent_frames].data, strcat(pDirent->d_name, ""));
                             rtt_init(&(send_buf[sent_frames].rttinfo));
                             printf("Sending: %s Index %d w_size  %d WindowOffset %d\n", resp, sent_frames, curr_wsize, get_woffset());
-                            //                      if (sent_frames >= curr_wsize-1)
                             frame_burst++;
-                            send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 1);
-                            
-                            while (get_frameburst() == winc_val && get_cumloffset() != get_woffset()){
-                            printf("Waiting on while %d %d\n", sent_frames, curr_wsize-1);
-                           //     frame_burst = 0;
-                       //         yield();
-                            }
-                            if (get_frameburst() == winc_val)
-                                frame_burst = 0;
-                            //                     else
-                            //                       send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len, 0);
-
-               //             printf("Out of while recvhdr.cuml_ack %d %d", recvhdr.cuml_ack, get_woffset());
-                            //             if (sent_frames >= curr_wsize-1 || sent_frames >= recvhdr.adv-1 || nextDirent == NULL)
-               //                 recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
+                            send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len);
                             sent_frames++;
+
+                            if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
+                                while(get_cumloffset() < get_woffset()){
+                                    usleep(100);
+                                    fflush(stdout);
+                                    frame_burst = 0;
+                                    timer_running = 0;
+                                }
+                            }
                             pDirent = nextDirent;
                         }
-                        //         recv_ackfrom_cli(eph_sock, (SA *)&cliaddr, len);
-
-
                         closedir (p_dir);
                     }
+                   printf("Directory data buffered. Closing dir\n"); 
+                    while(get_cumloffset() < get_woffset()){
+                        //POLL
+                        usleep(100);
+                        fflush(stdout);
+                        frame_burst = 0;
+                    }
+                    clear_up();    
                 }
                 else if (strstr(command, "download")){
-                    printf("download issued");
+                    printf("Download command issued\n");
                     printf("%s", command);
                     fflush(stdout);
                     char *d_args = strtok(command, " ");
                     d_args = strtok(NULL, " \n");
+                    
                     char path[MAXLINE];
                     strcpy(path, SHARED_PATH);
                     strcat(path, d_args);
+                    
                     int fd = open(path, O_RDONLY);
-                    if (fd < 0){
-                        char *msg = "Error Downloading file from server"; 
-                        Sendto(eph_sock, msg, strlen(msg), 0, (SA *) &cliaddr, len);
-                        continue;
-                    }
-                    char file_buf[MAXLINE];
+                    
+                    char file_buf[MAXLINE] = {0};
+                    frame_burst = 0;
+                    int sent_frames = 0;
+                    int last = 0;
                     int n;
-                    while ((n = read(fd, file_buf, MAXLINE)) > 0) {
-                        iovsend[0].iov_base = &sendhdr;
-                        iovsend[0].iov_len = sizeof(struct pkt_hdr);
-                        iovsend[1].iov_base = file_buf;
-                        iovsend[1].iov_len = n;
-                        sendmsg(eph_sock, &msgsend, 0);
-                    //    send_to_cli(eph_sock, file_buf, n, (SA *)&cliaddr, len);
-                 //       Sendto(eph_sock, file_buf, n, 0, (SA *) &cliaddr, len);
+                    rtt_init(&rttinfo);
+                    
+                    if (fd < 0){
+                        strcpy(file_buf, "Error Downloading file from server"); 
+
+                        fprintf(stderr, "Could not open file %s for reading", path);
+                        sendhdr.last = 0;
+                        send_buf[sent_frames].sent = 1;
+                        strcpy(send_buf[sent_frames].data, file_buf);
+                        rtt_init(&(send_buf[sent_frames].rttinfo));
+
+                        send_to_cli(eph_sock, file_buf, strlen(file_buf), 0, (SA *)&cliaddr, len);
                     }
-                    sendhdr.seq++;
+                    else{
+                        n = read(fd, file_buf, MAXLINE);
+                        char next_filebuf[MAXLINE] = {0};
+
+                        while (n > 0) {
+                            n = read(fd, next_filebuf, MAXLINE);
+
+                            if (n <= 0 || n < MAXLINE)
+                                sendhdr.last = sent_frames;
+                            else
+                                sendhdr.last = -1;
+
+                            send_buf[sent_frames].sent = 1;
+                            strcpy(send_buf[sent_frames].data, file_buf);
+                            rtt_init(&(send_buf[sent_frames].rttinfo));
+                            printf("Sending: %s Index %d w_size  %d WindowOffset %d\n", file_buf, sent_frames, curr_wsize, get_woffset());
+                            frame_burst++;
+                            send_to_cli(eph_sock, file_buf, strlen(file_buf), sent_frames, (SA *)&cliaddr, len);
+                            sent_frames++;
+
+                            if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
+                                while(get_cumloffset() < get_woffset()){
+                                    usleep(100);
+                                    fflush(stdout);
+                                    frame_burst = 0;
+                                    timer_running = 0;
+                                }
+                            }
+                            strcpy(file_buf, next_filebuf);
+                        }
+                    }
+                    close(fd);
+                    printf("File contents buffered. Closing file\n"); 
+                    while(get_cumloffset() < get_woffset()){
+                        //POLL
+                        usleep(100);
+                        fflush(stdout);
+                        frame_burst = 0;
+                    }
+                    clear_up();    
                 }
                 else
-                        send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len, 0);
+                    send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len);
                 //    Sendto(eph_sock, command, n, 0, (SA *)&cliaddr, len);
                 memset(command, 0, sizeof(command));
             }

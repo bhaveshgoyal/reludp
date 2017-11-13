@@ -6,11 +6,14 @@
 #define PROB_LOSS 0.5
 #define RTT_DEBUG
 #define MAX_WSIZE 1024
-int recv_window[MAX_WSIZE];
+#define SHARED_PATH "./"
 int curr_wsize = 4;
+
+int last_pktidx = -1;
 
 typedef struct buf_entry{
     int recvd;
+    int dirty;
     char data[MAXLINE];
 
 }buf_entry;
@@ -31,9 +34,9 @@ static struct hdr {
 
 int calc_drop_prob(){
     double prob = rand()/(double)RAND_MAX;
-    printf("PACKET PROB: %lf %lf", prob, PROB_LOSS);
+//    printf("PACKET PROB: %lf %lf", prob, PROB_LOSS);
     if (prob < PROB_LOSS){
-    printf(" Dropping Packet\n");
+//    printf("Dropping Packet\n");
         return 1;
     }
     return 0;
@@ -53,14 +56,52 @@ void clear_up(){
     int i;
     srand(seed);
     for(i = 0; i < MAX_WSIZE; i++){
-        recv_window[i] = 0;
         recv_buf[i].recvd = 0;
-        memset(recv_buf[i].data, 0, MAX_WSIZE);
+        recv_buf[i].dirty = 0;
+        memset(recv_buf[i].data, 0, MAXLINE);
     }
     curr_wsize = 4;
+    last_pktidx = -1;
     memset(&sendhdr, 0, sizeof(sendhdr));
     memset(&recvhdr, 0, sizeof(recvhdr));
 
+}
+int check_clear_up(){
+    int i = 0;
+    for(i = 0;i < MAX_WSIZE; i++){
+        if (recv_buf[i].recvd == 0)
+            break;
+    }
+    if (i-1 == last_pktidx){
+        printf("Check successful %d %d\n", i-1, last_pktidx);
+        fflush(stdout);
+    }
+    return (i-1 == last_pktidx) ? 1 : 0;
+}
+void *read_buf(void* out_fds){
+
+    int fds = *((int *)out_fds);
+    while(1){
+    int i = 0;
+    for(i = 0; i < MAX_WSIZE; i++){
+        if (recv_buf[i].recvd == 1 && recv_buf[i].dirty == 0){
+            if (write(fds, recv_buf[i].data, strlen(recv_buf[i].data)) < 0){
+                fprintf(stderr, "Could not write to Output File Descriptor. Abort\n");
+            }
+   //         fflush(fds);
+            recv_buf[i].dirty = 1;
+        }
+    }
+    if (last_pktidx >= 0 && (check_clear_up() == 1)){
+        clear_up();
+        printf("All Server data received. Press ENTER to execute Next Command.\n");
+        fflush(stdout);
+        if (fds != 1)
+            close(fds);
+        break;
+    }
+    sleep(5);
+    }
 }
 // REQ ->; EPH_NUM <-; ACK ->
 int eph_cli_handshake(int sockfd, struct sockaddr_in *servaddr, char *serv_ip){
@@ -69,7 +110,7 @@ int eph_cli_handshake(int sockfd, struct sockaddr_in *servaddr, char *serv_ip){
 
     char cmd[MAXLINE];
     strcat(cmd, "REQ");
-    
+
     char eph_port[MAXLINE];
 
     int attempt = 1;
@@ -172,7 +213,7 @@ sendagain:
 int get_unacked(){
     int i = 0;
     for(i = 0; i < MAX_WSIZE; i++){
-        if (recv_window[i] == 0)
+        if (recv_buf[i].recvd == 0)
             return i;
     }
     return curr_wsize;
@@ -195,7 +236,8 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     int n = 0;
     do{
         n = recvmsg(sockfd, &msgrecv, 0);
-        printf("Received %s ", recvline);
+//        printf("Received %s ", recvline);
+        strcpy(recv_buf[recvhdr.seq].data, recvline);
         //      printf("\nReceiving %s %d %d %d %d %d\n", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, curr_wsize, recvhdr.last);
         fflush(stdout);
         memset(recvline, 0, sizeof(recvline));
@@ -209,12 +251,20 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
         rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
     }
 
-    recv_window[recvhdr.seq] = 1;
+    // Print msg if the buffer is full
+    if (recvhdr.seq == MAX_WSIZE){
+        printf("Client Buffer Full. Program behaviour might get disrupted\n");
+        fflush(stdout);
+    }
+    recv_buf[recvhdr.seq].recvd = 1;
     int unacked = get_unacked();
 
     //    if (unacked < recvhdr.seq || recvhdr.seq+1 == curr_wsize){
-    if (recvhdr.last == 1){
+    if (recvhdr.last != -1){
+        printf("Last packet index received at %d\n", recvhdr.last);
         sendhdr.last = 1;
+        last_pktidx = recvhdr.last;
+        fflush(stdout);
     }
     send_ackto_srv(sockfd, servaddr, servaddrlen, recvhdr.seq);
     //    }
@@ -277,9 +327,9 @@ int main(int argc, char **argv){
        recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
 //            int n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
 //            recvline[n] = 0;
-            Fputs(recvline, stdout);
-            fflush(stdout);
-            memset(recvline, 0, sizeof(recvline));
+       Fputs(recvline, stdout);
+       fflush(stdout);
+       memset(recvline, 0, sizeof(recvline));
         }
         else if (FD_ISSET(STDIN_FILENO, &readfs)){
             if(Fgets(sendline, MAXLINE, stdin) != NULL){
@@ -291,17 +341,49 @@ int main(int argc, char **argv){
                 if (eph_port_recv == 0){
                     if ((sockfd = eph_cli_handshake(sockfd, &servaddr , argv[1])) > 0){
                         eph_port_recv = 1;
-                        rtt_init(&rttinfo);
-                        rttinit = 1;
-                        rtt_d_flag = 1;
                     }
                     else{
                         fprintf(stderr, "Something went wrong while doing handshake. Abort\n");
                         exit(0);
                     }
                 }
+
                 cmdacked = 0;
+                int out_des = 1;
+                if (strstr(sendline, ">")){
+                    char copy_cmd[MAXLINE];
+                    strcpy(copy_cmd, sendline);
+                    char *d_args = strtok(copy_cmd, " ");
+                    d_args = strtok(NULL, " \n");
+                    d_args = strtok(NULL, " \n");
+                    d_args = strtok(NULL, " \n");
+                    char path[MAXLINE];
+                    strcpy(path, SHARED_PATH);
+                    strcpy(path, d_args);
+                    printf("Output file Path: %s\n", path);
+
+                    int fd = open(path, O_CREAT | O_WRONLY, 0664);
+                    if (fd < 0){
+                        fprintf(stderr, "Could not Open file at %s for writing\n",path);
+                        return;
+                    }
+                    else
+                        out_des = fd;
+                    fflush(stdout);
+                }
                 
+                rtt_init(&rttinfo);
+                rttinit = 1;
+                rtt_d_flag = 1;
+                
+                // Start Recv Buffer Thread Readr
+                pthread_t tid_readr; 
+                if (pthread_create(&tid_readr, NULL, read_buf, (void *)&out_des) < 0){
+                    printf("Could not create Recvbuffer thread listener\n. Abort");
+                    fflush(stdout);
+                    return;
+                }
+                pthread_detach(tid_readr);
                 send_to_srv(sockfd, sendline, strlen(sendline), (SA *)&servaddr, sizeof(servaddr));
                 memset(sendline, 0, sizeof(sendline));
                 //            Sendto(sockfd, sendline, strlen(sendline), 0, (SA *)&servaddr, sizeof(servaddr));
@@ -309,5 +391,5 @@ int main(int argc, char **argv){
             }
         }
     }
-        return 0;
+    return 0;
 }
