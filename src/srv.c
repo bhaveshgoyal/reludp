@@ -9,15 +9,15 @@
 //#define MAX_WSIZE 1024
 //#define SHARED_PATH "./"
 #define FTRANS_TTH 2 //ssth
-#define ADDI_PAR 4
 #define MULTD_FACT 0.5
-#define SSTH 0
+#define SSTH 40
 
 static char SHARED_PATH[MAXLINE];
 static int MAX_WSIZE = 1024;
 static int SERVER_PORT = 9877;
 
 static int curr_wsize = 4; //cwnd
+static int ADDI_PAR = 4;
 static int frame_burst = 0;
 
 static int timer_running = 0;
@@ -313,7 +313,10 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
             send_buf[acked].sent++;
     }
     else if (acked == curr_wsize) { //Everything in current window received
-        if (curr_wsize+ADDI_PAR > MAX_WSIZE ) //TODO Increase window size slowly after reaching threshold
+        if (curr_wsize + ADDI_PAR > SSTH){ //Slow Start
+            ADDI_PAR = 1;
+        }
+        if (curr_wsize+ADDI_PAR > MAX_WSIZE ) 
             printf("Max Window Size Reached for Server\n");
         else{
             curr_wsize += ADDI_PAR;
