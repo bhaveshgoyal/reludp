@@ -449,6 +449,7 @@ int main(int argc, char **argv){
     const int on = 1;
     struct sockaddr_in *servaddr, cliaddr;
     struct ifi_info *ifi, *ifihead;
+    int ifisockets[MAXLINE];
 
     if (fileio("./server.in") == 0){
         fprintf(stderr, "error: Not able to read config file server.in");
@@ -457,201 +458,223 @@ int main(int argc, char **argv){
 
     send_buf = (buf_entry *)malloc(sizeof(buf_entry)*MAX_WSIZE);
     cuml_buf = (int *)malloc(sizeof(int)*MAX_WSIZE);
-
+    int index = 0;
     for (ifihead = ifi = Get_ifi_info(AF_INET, 1); ifi != NULL;ifi=ifi->ifi_next){
-    sockfd = Socket(AF_INET, SOCK_DGRAM, 0);
-    
-    Setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-    
-    bzero(&servaddr, sizeof(servaddr));
-    servaddr = (struct sockaddr_in *) ifi->ifi_addr;
-    servaddr->sin_family = AF_INET;
-    servaddr->sin_port = htons(SERVER_PORT);
-    Bind(sockfd, (SA *) servaddr, sizeof(*servaddr));
+        ifisockets[index] = Socket(AF_INET, SOCK_DGRAM, 0);
 
-    printf("Server bound at interface %s\n", Sock_ntop((SA *) servaddr, sizeof(*servaddr)));
-    
+        Setsockopt(ifisockets[index], SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+        bzero(&servaddr, sizeof(servaddr));
+        servaddr = (struct sockaddr_in *) ifi->ifi_addr;
+        servaddr->sin_family = AF_INET;
+        servaddr->sin_port = htons(SERVER_PORT);
+        Bind(ifisockets[index], (SA *) servaddr, sizeof(*servaddr));
+
+        printf("Server bound at interface %s\n", Sock_ntop((SA *) servaddr, sizeof(*servaddr)));
+        index++;
     }
-    
+
     int len = sizeof(cliaddr);
 
     char msg[MAXLINE];
+    
+    fd_set readfs;
 
     struct iovec iovsend[2];
     while(1){
-        
-        int n = recvfrom(sockfd, msg, MAXLINE, 0, (SA *)&cliaddr, &len);
-        int pid = fork();
-        
-        if (pid == 0){
-            char command[MAXLINE] = {0};
-            printf("Received: %s\n. Trying Ephemeral Handshake\n", msg);
-            int eph_sock = eph_serv_handshake(sockfd, &cliaddr);
-            if (eph_sock > 0){
-                struct sockaddr_in echoaddr;
-                int addr_size = sizeof(echoaddr);
-                getsockname(eph_sock, (SA *)&echoaddr, &addr_size);
-                rtt_init(&rttinfo);
-                rttinit = 1;
-                rtt_d_flag = 1;
-                
-                msgsend.msg_name = (SA *)&cliaddr;
-                msgsend.msg_namelen = len;
-                msgsend.msg_iov = iovsend;
-                msgsend.msg_iovlen = 2;
+        FD_ZERO(&readfs);
 
-                printf("Handshake established at %s:%d\n", inet_ntoa(echoaddr.sin_addr), ntohs(echoaddr.sin_port));
+        int max_fd = -1;
+        int i = 0;
+        for(i = 0; i <= index; i++) {
+            FD_SET(ifisockets[i], &readfs);
+            if (ifisockets[i] > max_fd)
+                max_fd = ifisockets[i];
+        }
+        int status = select(max_fd + 1, &readfs, NULL, NULL, NULL);
+        if (status < 0) {
+            printf("Err: %d. Unable to monitor Interfaces. Abort\n",status);
+            return;
+        }
+        for(i = 0; i <= index; i++) {
+            if (FD_ISSET(ifisockets[i], &readfs)) {
+                printf("Socket Sert");
                 fflush(stdout);
-                close(sockfd);
-            }
-            else{
-                fprintf(stderr, "err: Something unknown happened while establishing UDP ephemeral handshake. Abort\n");
-                exit(0);
-            }
+                sockfd = ifisockets[i];
+                int n = recvfrom(sockfd, msg, MAXLINE, 0, (SA *)&cliaddr, &len);
+                int pid = fork();
 
-            while(1){
-                printf("\nWaiting for Client Command\n");
-                fflush(stdout);
-                recv_cmdfrom_cli(eph_sock, (SA *)&cliaddr, len, command);
-                clear_up();
-                if (strstr(command, "list")){
-                    printf("List command issued. Reading from %s\n", SHARED_PATH);
-                    fflush(stdout);
-                    DIR *p_dir = opendir(SHARED_PATH);
-                    char resp[MAXLINE] = {0};
-                    frame_burst = 0;
-                    int sent_frames = 0;
-                    int last = 0;
-                    rtt_init(&rttinfo);
-                    if (p_dir == NULL){
-                        strcpy(resp, "Can't open present directory for reading");
-                        fprintf(stderr, "%s", resp);
-                        sendhdr.last = 0;
-                        send_buf[sent_frames].sent = 1;
-                        strcpy(send_buf[sent_frames].data, resp);
-                        rtt_init(&(send_buf[sent_frames].rttinfo));
-                        send_to_cli(eph_sock, resp, strlen(resp), 0, (SA *)&cliaddr, len);
+                if (pid == 0){
+                    char command[MAXLINE] = {0};
+                    printf("Received: %s\n. Trying Ephemeral Handshake\n", msg);
+                    int eph_sock = eph_serv_handshake(sockfd, &cliaddr);
+                    if (eph_sock > 0){
+                        struct sockaddr_in echoaddr;
+                        int addr_size = sizeof(echoaddr);
+                        getsockname(eph_sock, (SA *)&echoaddr, &addr_size);
+                        rtt_init(&rttinfo);
+                        rttinit = 1;
+                        rtt_d_flag = 1;
+
+                        msgsend.msg_name = (SA *)&cliaddr;
+                        msgsend.msg_namelen = len;
+                        msgsend.msg_iov = iovsend;
+                        msgsend.msg_iovlen = 2;
+
+                        printf("Handshake established at %s:%d\n", inet_ntoa(echoaddr.sin_addr), ntohs(echoaddr.sin_port));
+                        fflush(stdout);
+                        close(sockfd);
                     }
                     else{
-                        struct dirent *pDirent;
-                        pDirent = readdir(p_dir);
-                        while (pDirent != NULL) {
+                        fprintf(stderr, "err: Something unknown happened while establishing UDP ephemeral handshake. Abort\n");
+                        exit(0);
+                    }
 
-                            struct dirent *nextDirent = readdir(p_dir);
-                            if (nextDirent == NULL)
-                                sendhdr.last = sent_frames;
-                            else
-                                sendhdr.last = -1;
-                            
-                            send_buf[sent_frames].sent = 1;
-                            memset(resp, 0, MAXLINE); 
-                            strcpy(resp, strcat(pDirent->d_name, "\n"));
-                            strcpy(send_buf[sent_frames].data, strcat(pDirent->d_name, ""));
-                            rtt_init(&(send_buf[sent_frames].rttinfo));
-                            printf("Sending: %s  Index: %d  Current Wsize: %d  Current Packet SentOffset: %d\n", resp, sent_frames, curr_wsize, get_woffset());
-                            frame_burst++;
-                            send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len);
-                            sent_frames++;
+                    while(1){
+                        printf("\nWaiting for Client Command\n");
+                        fflush(stdout);
+                        recv_cmdfrom_cli(eph_sock, (SA *)&cliaddr, len, command);
+                        clear_up();
+                        if (strstr(command, "list")){
+                            printf("List command issued. Reading from %s\n", SHARED_PATH);
+                            fflush(stdout);
+                            DIR *p_dir = opendir(SHARED_PATH);
+                            char resp[MAXLINE] = {0};
+                            frame_burst = 0;
+                            int sent_frames = 0;
+                            int last = 0;
+                            rtt_init(&rttinfo);
+                            if (p_dir == NULL){
+                                strcpy(resp, "Can't open present directory for reading");
+                                fprintf(stderr, "%s", resp);
+                                sendhdr.last = 0;
+                                send_buf[sent_frames].sent = 1;
+                                strcpy(send_buf[sent_frames].data, resp);
+                                rtt_init(&(send_buf[sent_frames].rttinfo));
+                                send_to_cli(eph_sock, resp, strlen(resp), 0, (SA *)&cliaddr, len);
+                            }
+                            else{
+                                struct dirent *pDirent;
+                                pDirent = readdir(p_dir);
+                                while (pDirent != NULL) {
 
-                            if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
-                                while(get_cumloffset() < get_woffset()){
-                                    usleep(100);
-                                    fflush(stdout);
-                                    frame_burst = 0;
-                                    timer_running = 0;
+                                    struct dirent *nextDirent = readdir(p_dir);
+                                    if (nextDirent == NULL)
+                                        sendhdr.last = sent_frames;
+                                    else
+                                        sendhdr.last = -1;
+
+                                    send_buf[sent_frames].sent = 1;
+                                    memset(resp, 0, MAXLINE); 
+                                    strcpy(resp, strcat(pDirent->d_name, "\n"));
+                                    strcpy(send_buf[sent_frames].data, strcat(pDirent->d_name, ""));
+                                    rtt_init(&(send_buf[sent_frames].rttinfo));
+                                    printf("Sending: %s  Index: %d  Current Wsize: %d  Current Packet SentOffset: %d\n", resp, sent_frames, curr_wsize, get_woffset());
+                                    frame_burst++;
+                                    send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len);
+                                    sent_frames++;
+
+                                    if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
+                                        while(get_cumloffset() < get_woffset()){
+                                            usleep(100);
+                                            fflush(stdout);
+                                            frame_burst = 0;
+                                            timer_running = 0;
+                                        }
+                                    }
+                                    pDirent = nextDirent;
+                                }
+                                closedir (p_dir);
+                            }
+                            printf("Directory data buffered. Closing dir\n"); 
+                            while(get_cumloffset() < get_woffset()){
+                                //POLL
+                                usleep(100);
+                                fflush(stdout);
+                                frame_burst = 0;
+                            }
+                            printf("Outside while %d %d", get_cumloffset(), get_woffset());
+                            clear_up();    
+                        }
+                        else if (strstr(command, "download")){
+                            printf("Download command issued\n");
+                            printf("%s", command);
+                            fflush(stdout);
+                            char *d_args = strtok(command, " ");
+                            d_args = strtok(NULL, " \n");
+
+                            char path[MAXLINE];
+                            strcpy(path, SHARED_PATH);
+                            strcat(path, d_args);
+
+                            int fd = open(path, O_RDONLY);
+
+                            char file_buf[MAXLINE] = {0};
+                            frame_burst = 0;
+                            int sent_frames = 0;
+                            int last = 0;
+                            int n;
+                            rtt_init(&rttinfo);
+
+                            if (fd < 0){
+                                strcpy(file_buf, "Error Downloading file from server"); 
+
+                                fprintf(stderr, "Could not open file %s for reading", path);
+                                sendhdr.last = 0;
+                                send_buf[sent_frames].sent = 1;
+                                strcpy(send_buf[sent_frames].data, file_buf);
+                                rtt_init(&(send_buf[sent_frames].rttinfo));
+
+                                send_to_cli(eph_sock, file_buf, strlen(file_buf), 0, (SA *)&cliaddr, len);
+                            }
+                            else{
+                                n = read(fd, file_buf, MAXLINE);
+                                char next_filebuf[MAXLINE] = {0};
+
+                                while (n > 0) {
+                                    n = read(fd, next_filebuf, MAXLINE);
+
+                                    if (n <= 0 || n < MAXLINE)
+                                        sendhdr.last = sent_frames;
+                                    else
+                                        sendhdr.last = -1;
+
+                                    send_buf[sent_frames].sent = 1;
+                                    strcpy(send_buf[sent_frames].data, file_buf);
+                                    rtt_init(&(send_buf[sent_frames].rttinfo));
+                                    printf("Sending: %s Index %d w_size  %d WindowOffset %d\n", file_buf, sent_frames, curr_wsize, get_woffset());
+                                    frame_burst++;
+                                    send_to_cli(eph_sock, file_buf, strlen(file_buf), sent_frames, (SA *)&cliaddr, len);
+                                    sent_frames++;
+
+                                    if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
+                                        while(get_cumloffset() < get_woffset()){
+                                            usleep(100);
+                                            fflush(stdout);
+                                            frame_burst = 0;
+                                            timer_running = 0;
+                                        }
+                                    }
+                                    strcpy(file_buf, next_filebuf);
                                 }
                             }
-                            pDirent = nextDirent;
-                        }
-                        closedir (p_dir);
-                    }
-                   printf("Directory data buffered. Closing dir\n"); 
-                    while(get_cumloffset() < get_woffset()){
-                        //POLL
-                        usleep(100);
-                        fflush(stdout);
-                        frame_burst = 0;
-                    }
-                    printf("Outside while %d %d", get_cumloffset(), get_woffset());
-                    clear_up();    
-                }
-                else if (strstr(command, "download")){
-                    printf("Download command issued\n");
-                    printf("%s", command);
-                    fflush(stdout);
-                    char *d_args = strtok(command, " ");
-                    d_args = strtok(NULL, " \n");
-                    
-                    char path[MAXLINE];
-                    strcpy(path, SHARED_PATH);
-                    strcat(path, d_args);
-                    
-                    int fd = open(path, O_RDONLY);
-                    
-                    char file_buf[MAXLINE] = {0};
-                    frame_burst = 0;
-                    int sent_frames = 0;
-                    int last = 0;
-                    int n;
-                    rtt_init(&rttinfo);
-                    
-                    if (fd < 0){
-                        strcpy(file_buf, "Error Downloading file from server"); 
-
-                        fprintf(stderr, "Could not open file %s for reading", path);
-                        sendhdr.last = 0;
-                        send_buf[sent_frames].sent = 1;
-                        strcpy(send_buf[sent_frames].data, file_buf);
-                        rtt_init(&(send_buf[sent_frames].rttinfo));
-
-                        send_to_cli(eph_sock, file_buf, strlen(file_buf), 0, (SA *)&cliaddr, len);
-                    }
-                    else{
-                        n = read(fd, file_buf, MAXLINE);
-                        char next_filebuf[MAXLINE] = {0};
-
-                        while (n > 0) {
-                            n = read(fd, next_filebuf, MAXLINE);
-
-                            if (n <= 0 || n < MAXLINE)
-                                sendhdr.last = sent_frames;
-                            else
-                                sendhdr.last = -1;
-
-                            send_buf[sent_frames].sent = 1;
-                            strcpy(send_buf[sent_frames].data, file_buf);
-                            rtt_init(&(send_buf[sent_frames].rttinfo));
-                            printf("Sending: %s Index %d w_size  %d WindowOffset %d\n", file_buf, sent_frames, curr_wsize, get_woffset());
-                            frame_burst++;
-                            send_to_cli(eph_sock, file_buf, strlen(file_buf), sent_frames, (SA *)&cliaddr, len);
-                            sent_frames++;
-
-                            if (get_frameburst() == curr_wsize && get_cumloffset() != get_woffset()){
-                                while(get_cumloffset() < get_woffset()){
-                                    usleep(100);
-                                    fflush(stdout);
-                                    frame_burst = 0;
-                                    timer_running = 0;
-                                }
+                            close(fd);
+                            printf("File contents buffered. Closing file\n"); 
+                            while(get_cumloffset() < get_woffset()){
+                                //POLL
+                                usleep(100);
+                                fflush(stdout);
+                                frame_burst = 0;
                             }
-                            strcpy(file_buf, next_filebuf);
+                            clear_up();    
                         }
+                        //       else{
+                        //           send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len);
+                        //      }
+                        //    Sendto(eph_sock, command, n, 0, (SA *)&cliaddr, len);
+                        memset(command, 0, sizeof(command));
                     }
-                    close(fd);
-                    printf("File contents buffered. Closing file\n"); 
-                    while(get_cumloffset() < get_woffset()){
-                        //POLL
-                        usleep(100);
-                        fflush(stdout);
-                        frame_burst = 0;
-                    }
-                    clear_up();    
                 }
-         //       else{
-         //           send_to_cli(eph_sock, command, n, 0, (SA *)&cliaddr, len);
-          //      }
-                    //    Sendto(eph_sock, command, n, 0, (SA *)&cliaddr, len);
-                memset(command, 0, sizeof(command));
             }
         }
 
@@ -661,7 +684,7 @@ int main(int argc, char **argv){
 }
 int fileio(char *fname){
 
-  FILE *confd = fopen(fname, "r");
+        FILE *confd = fopen(fname, "r");
 
   if (confd == NULL){
     return 0;
