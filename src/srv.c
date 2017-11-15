@@ -15,7 +15,7 @@
 static char SHARED_PATH[MAXLINE];
 static int MAX_WSIZE = 1024;
 static int SERVER_PORT = 9877;
-
+int eph_port = 0;
 static int curr_wsize = 4; //cwnd
 static int ADDI_PAR = 4;
 static int frame_burst = 0;
@@ -33,7 +33,7 @@ static buf_entry *send_buf;
 
 static struct rtt_info rttinfo;
 static int rttinit = 0;
-static struct msghdr msgsend, msgrecv; /* assumed init to 0 */
+static struct msghdr msgsend, msgrecv, cmdrecv; /* assumed init to 0 */
 
 static struct pkt_hdr {
     uint32_t seq;
@@ -41,7 +41,7 @@ static struct pkt_hdr {
     uint32_t cuml_ack;
     uint32_t adv;
     uint32_t last;
-}sendhdr, recvhdr;
+}sendhdr, recvhdr, cmdhdr;
 
 typedef struct t_args {
     int sockfd;
@@ -141,31 +141,61 @@ int eph_serv_handshake(int sockfd, struct sockaddr_in *cliaddr){
     struct timeval tv;
     int attempt = 1;
 
-recv_ack:
+//recv_ack:
     tv.tv_sec = 5;
     tv.tv_usec = 0;
-    Setsockopt(eph_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    Sendto(eph_sock, ephport_res, strlen(ephport_res), 0, (SA *)cliaddr, len);
+//    Setsockopt(eph_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    
+    fd_set readfs;
+    
     char msg[MAXLINE];
-    int r = recvfrom(eph_sock, msg, MAXLINE, 0, (SA *)cliaddr, &len);
-    if (r < 0){
-        if (errno == EWOULDBLOCK) {
+    sendto(eph_sock, ephport_res, strlen(ephport_res), 0, (SA *)cliaddr, len);
+    
+    while(1){
+        FD_ZERO(&readfs);
+        FD_SET(eph_sock, &readfs);
+        int status = select(eph_sock+1, &readfs, NULL, NULL, &tv);
+        if (status < 0){
+            fprintf(stderr, "Could not select on eph socket.\n");
+            continue;
+        }
+        if (FD_ISSET(eph_sock, &readfs)){
+            int r = recvfrom(eph_sock, msg, MAXLINE, 0, (SA *)cliaddr, &len);
+            printf("MSG: %s", msg);
+            fflush(stdout);
+            break;      
+        }
+        else{
             attempt++;
-            if (attempt > 5){
-                 err_sys("ServerTimeout: Could not communicate with client\n");  
-                Sendto(sockfd, ephport_res, strlen(ephport_res), 0, (SA *)cliaddr, len);
-                Sendto(eph_sock, ephport_res, strlen(ephport_res), 0, (SA *)cliaddr, len);
-            }
+            if (attempt > 5)
+                err_sys("Server Timeout: Could not communicate with client\n");
             fprintf(stderr, "Recvfrom socket timeout while fetching ACK. Retrying attempt #%d\n", attempt-1);
-            goto recv_ack;
-        } else
-            err_sys("Recvfrom err while attempting handshake\n");
+            sendto(eph_sock, ephport_res, strlen(ephport_res), 0, (SA *)&cliaddr, len);
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+        }
+
+    
+    
     }
+//    int r = recvfrom(eph_sock, msg, MAXLINE, 0, (SA *)cliaddr, &len);
+  //  if (r < 0){
+//        if (errno == EWOULDBLOCK) {
+//            attempt++;
+//            if (attempt > 5){
+//                 err_sys("ServerTimeout: Could not communicate with client\n");  
+//            }
+//            fprintf(stderr, "Recvfrom socket timeout while fetching ACK. Retrying attempt #%d\n", attempt-1);
+//            goto recv_ack;
+//        } else
+  //          err_sys("Recvfrom err while attempting handshake\n");
+//    }
    
     // Disable Timeout
     tv.tv_sec = 0;
     tv.tv_usec = 0;
-    Setsockopt(eph_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+//    alarm(0);
+//    Setsockopt(eph_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (strstr(msg, "ACK"))
         return eph_sock;
@@ -177,7 +207,17 @@ static void sig_alrm(int signo)
 {
     siglongjmp(jmpbuf, 1);
 }
+void calc_rtt_avg(int seq){
+    float stamp;
+    int count = 1;
+    int i = 0;
+    for(i = seq; i >= 0 && count <= 5; i--){
+        stamp += send_buf[i].rttinfo.rtt_rto;
+        count++;
+    }
+    rttinfo.rtt_rto = (stamp/(float)count);
 
+}
 void *recv_handler(void *connParams){
     t_args *args = connParams;
     fd_set readfs;
@@ -189,7 +229,7 @@ void *recv_handler(void *connParams){
     char *resp = (*(args)).resp;
     int resplen = (*(args)).resplen;
     int seq = (*(args)).seq;
-    printf("Thread seq:  %d %s %d %d\n", sockfd, resp, resplen, (*(args)).seq);
+    printf("Retransmission Thread handler for seq: %d  data: %s\n", (*(args)).seq, resp);
     fflush(stdout);
     struct iovec iovsend[2];
     iovsend[0].iov_base = &sendhdr;
@@ -283,8 +323,8 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     }while(n < sizeof(struct pkt_hdr));
 
     rtt_stop(&(send_buf[recvhdr.seq].rttinfo), rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
-    rtt_stop(&rttinfo, rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
-    
+//    rtt_stop(&rttinfo, rtt_ts(&(send_buf[recvhdr.seq].rttinfo)) - recvhdr.ts);
+    calc_rtt_avg(recvhdr.seq); 
 //    timer_running = 0;
     int acked = recvhdr.cuml_ack;
     set_cumloffset(acked);
@@ -352,31 +392,8 @@ int recv_ackfrom_cli(int sockfd, SA *cliaddr, socklen_t cliaddrlen){
     pthread_detach(tid);
     }
     fflush(stdout);
-    //    alarm(0);
-//    rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
 }
-/*
-int recv_from_cli(int sockfd, char *recvline, SA *cliaddr, socklen_t cliaddrlen){
-    struct iovec iovrecv[2];
-    msgrecv.msg_name = cliaddr;
-    msgrecv.msg_namelen = cliaddrlen;
-    msgrecv.msg_iov = iovrecv;
-    msgrecv.msg_iovlen = 2;
-    iovrecv[0].iov_base = &recvhdr;
-    iovrecv[0].iov_len = sizeof(struct hdr);
-    iovrecv[1].iov_base = recvline;
-    iovrecv[1].iov_len = MAXLINE;
-    int n = 0;
 
-    do{
-        n = recvmsg(sockfd, &msgrecv, 0);
-        printf("recieving %s %d %d %d %d", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, sendhdr.seq);
-        fflush(stdout);
-        } while (n < sizeof(struct hdr) || recvhdr.seq != sendhdr.seq);
-        alarm(0);
-        rtt_stop(&rttinfo, rtt_ts(&rttinfo) - recvhdr.ts);
-        }
-        */
 int send_to_cli(int sockfd, char *resp, int resplen, int seq, SA *cliaddr, socklen_t cliaddrlen){
 
     struct timeval  timeout;
@@ -408,7 +425,7 @@ int send_to_cli(int sockfd, char *resp, int resplen, int seq, SA *cliaddr, sockl
     t_args *connParams = (t_args *)malloc(sizeof(t_args));
     
     connParams->sockfd = sockfd;
-    connParams->timeout = timeout;
+    connParams->timeout = send_buf[seq].tv;
     connParams->cliadd = cliaddr;
     connParams->cliaddlen = cliaddrlen;
     connParams->seq = seq;
@@ -462,11 +479,13 @@ int main(int argc, char **argv){
 
     struct iovec iovsend[2];
     while(1){
-        int n = Recvfrom(sockfd, msg, MAXLINE, 0, (SA *)&cliaddr, &len);
+        
+        int n = recvfrom(sockfd, msg, MAXLINE, 0, (SA *)&cliaddr, &len);
         int pid = fork();
+        
         if (pid == 0){
             char command[MAXLINE] = {0};
-            printf("Received: %s\n. Trying Ephemeral Handshake", msg);
+            printf("Received: %s\n. Trying Ephemeral Handshake\n", msg);
             int eph_sock = eph_serv_handshake(sockfd, &cliaddr);
             if (eph_sock > 0){
                 struct sockaddr_in echoaddr;
@@ -529,7 +548,7 @@ int main(int argc, char **argv){
                             strcpy(resp, strcat(pDirent->d_name, "\n"));
                             strcpy(send_buf[sent_frames].data, strcat(pDirent->d_name, ""));
                             rtt_init(&(send_buf[sent_frames].rttinfo));
-                            printf("Sending: %s Index %d w_size  %d WindowOffset %d\n", resp, sent_frames, curr_wsize, get_woffset());
+                            printf("Sending: %s  Index: %d  Current Wsize: %d  Current Packet SentOffset: %d\n", resp, sent_frames, curr_wsize, get_woffset());
                             frame_burst++;
                             send_to_cli(eph_sock, resp, strlen(resp), sent_frames, (SA *)&cliaddr, len);
                             sent_frames++;

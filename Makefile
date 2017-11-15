@@ -2,11 +2,11 @@
 CC = gcc
 
 LIBS = -lresolv -lnsl -lm -lpthread\
-		/home/courses/cse533/Stevens/unpv13e_solaris2.10/libunp.a\
+		/home/bhavesh/Desktop/CSE533/hw2/libs/unpv13e/libunp.a\
 
 FLAGS = -g -O2
 
-CFLAGS = ${FLAGS} -I/home/courses/cse533/Stevens/unpv13e_solaris2.10/lib
+CFLAGS = ${FLAGS} -I/home/bhavesh/Desktop/CSE533/hw2/libs/unpv13e/lib
 
 all: cli srv
 

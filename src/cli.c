@@ -38,13 +38,13 @@ static struct hdr {
 
 int calc_drop_prob(){
     double prob = rand()/(double)RAND_MAX;
-//    printf("PACKET PROB: %lf %lf", prob, PROB_LOSS);
+    //    printf("PACKET PROB: %lf %lf", prob, PROB_LOSS);
     if (prob < PROB_LOSS){
-//    printf("Dropping Packet\n");
+        printf("Dropping Packet\n");
         return 1;
     }
     return 0;
-//    return ((srand(seed)/(double)RAND_MAX) < PROB_LOSS) ? 0 : 1;
+    //    return ((srand(seed)/(double)RAND_MAX) < PROB_LOSS) ? 0 : 1;
 
 }
 static void sig_alrm(int signo);
@@ -86,27 +86,27 @@ void *read_buf(void* out_fds){
 
     int fds = *((int *)out_fds);
     while(1){
-    int i = 0;
-    for(i = 0; i < MAX_WSIZE; i++){
-        if (recv_buf[i].recvd == 1 && recv_buf[i].dirty == 0){
-            if (write(fds, recv_buf[i].data, strlen(recv_buf[i].data)) < 0){
-                fprintf(stderr, "Could not write to Output File Descriptor. Abort\n");
+        int i = 0;
+        for(i = 0; i < MAX_WSIZE; i++){
+            if (recv_buf[i].recvd == 1 && recv_buf[i].dirty == 0){
+                if (write(fds, recv_buf[i].data, strlen(recv_buf[i].data)) < 0){
+                    fprintf(stderr, "Could not write to Output File Descriptor. Abort\n");
+                }
+                //         fflush(fds);
+                recv_buf[i].dirty = 1;
             }
-   //         fflush(fds);
-            recv_buf[i].dirty = 1;
         }
-    }
-    if (last_pktidx >= 0 && (check_clear_up() == 1)){
-        clear_up();
-        printf("All Server data received. Press ENTER to execute Next Command.\n");
-        fflush(stdout);
-        if (fds != 1)
-            close(fds);
-        break;
-    }
-    float random = ((float)rand()/RAND_MAX);
-    float sleep_time = pow(M_E, (-1*delay*log(random)));
-    sleep(5);
+        if (last_pktidx >= 0 && (check_clear_up() == 1)){
+            clear_up();
+            printf("All Server data received. Press ENTER to execute Next Command.\n");
+            fflush(stdout);
+            if (fds != 1)
+                close(fds);
+            break;
+        }
+        float random = ((float)rand()/RAND_MAX);
+        float sleep_time = pow(M_E, (-1*delay*log(random)));
+        sleep(sleep_time);
     }
 }
 // REQ ->; EPH_NUM <-; ACK ->
@@ -122,33 +122,66 @@ int eph_cli_handshake(int sockfd, struct sockaddr_in *servaddr, char *serv_ip){
     int attempt = 1;
     struct timeval tv;
 
-eph_recv:
+    //eph_recv:
     tv.tv_sec = 5;
     tv.tv_usec = 0;
-    Sendto(sockfd, cmd, strlen(cmd), 0, (SA *)servaddr, servlen);
-    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    int n = recvfrom(sockfd, eph_port, MAXLINE, 0, NULL, NULL);
-    if (n < 0){
-        if (errno == EWOULDBLOCK) {
+
+    fd_set readfs;
+
+    sendto(sockfd, cmd, strlen(cmd), 0, (SA *)servaddr, servlen);
+    while(1){
+        FD_ZERO(&readfs);
+        FD_SET(sockfd, &readfs);
+        int status = select(sockfd+1, &readfs, NULL, NULL, &tv);
+        if (status < 0){
+            fprintf(stderr, "Could not select on eph socket.\n");
+            continue;
+        }
+
+        if (FD_ISSET(sockfd, &readfs)){
+            recvfrom(sockfd, eph_port, MAXLINE, 0, (SA *)servaddr, &servlen);
+            printf("PORT: %s", eph_port);
+            break;
+        }
+        else{
             attempt++;
             if (attempt > 5)
-                err_sys("Could not communicate with server");
-            fprintf(stderr, "Recvfrom socket timeout. Retrying attempt %d\n", attempt);
-            goto eph_recv;
-        } else
-            err_sys("Receiving eph port err while attempting handshake\n");
+                err_sys("Client Timeout: Could not communicate with server\n");
+            fprintf(stderr, "Recvfrom socket timeout while fetching Port Number. Retrying attempt #%d\n", attempt-1);
+            sendto(sockfd, cmd, strlen(cmd), 0, (SA *)servaddr, servlen);
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+        }
+
+
 
     }
-    else
-        eph_port[n] = 0;
 
-//  Disable Timeout
+    //    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    //    (int sockfd, char *recvline, SA *servaddr, socklen_t servaddrlen, int cmdacked)
+    //    int n = recv_from_srv(sockfd, eph_port, servaddr, servlen, 1);
+    //  if (n < 0){
+    //        if (errno == EWOULDBLOCK) {
+    //            attempt++;
+    //            if (attempt > 5)
+    //                err_sys("Could not communicate with server");
+    //            fprintf(stderr, "Recvfrom socket timeout. Retrying attempt %d\n", attempt);
+    //            goto eph_recv;
+    //        } else
+    //            err_sys("Receiving eph port err while attempting handshake\n");
+
+    //    }
+    //    else
+    //        eph_port[n] = 0;
+
+    //  Disable Timeout
     tv.tv_sec = 0;
     tv.tv_usec = 0;
-    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
+    //    alarm(0);
+    //    Setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     int ephsock = Socket(AF_INET, SOCK_DGRAM, 0);
-    
+
     bzero(servaddr, sizeof(*servaddr));
     (*servaddr).sin_family = AF_INET;
     (*servaddr).sin_port = htons((int) strtol(eph_port, (char **)NULL, 10));
@@ -160,8 +193,8 @@ eph_recv:
     getpeername(sockfd, (SA *)&addrinfo, &addr_size);
     fprintf(stdout, "\n\nClient bound at ephemeral port at server %s:%s\n\n", inet_ntoa(addrinfo.sin_addr), eph_port);
     fflush(stdout);
-    
-    Sendto(sockfd, "ACK", strlen("ACK"), 0, (SA *)servaddr, servlen);
+
+    sendto(ephsock, "ACK", strlen("ACK"), 0, (SA *)servaddr, servlen);
     return ephsock;
 
 }
@@ -177,9 +210,9 @@ int send_ackto_srv(int sockfd, SA *servaddr, socklen_t servaddrlen, int recv_seq
     msgsend.msg_iovlen = 1;
     iovsend[0].iov_base = &sendhdr;
     iovsend[0].iov_len = sizeof(struct hdr);
-//    iovsend[1].iov_base = resp;
-  //  iovsend[1].iov_len = resplen;
-        printf("Sending Cum Ack for %d\n", get_unacked());
+    //    iovsend[1].iov_base = resp;
+    //  iovsend[1].iov_len = resplen;
+    printf("Sending Cum Ack for %d\n", get_unacked());
     sendmsg(sockfd, &msgsend, 0);
 }
 
@@ -192,8 +225,10 @@ int send_to_srv(int sockfd, char *resp, int resplen, SA *servaddr, socklen_t ser
     msgsend.msg_iovlen = 2;
     iovsend[0].iov_base = &sendhdr;
     iovsend[0].iov_len = sizeof(struct hdr);
+    printf("%d", resplen);
+    resp[resplen] = 0;
     iovsend[1].iov_base = resp;
-    iovsend[1].iov_len = resplen;
+    iovsend[1].iov_len = resplen+1;
     static int attempt = 1;
     Signal(SIGALRM, sig_alrm);
     rtt_newpack(&rttinfo);
@@ -206,7 +241,7 @@ sendagain:
 
     if (sigsetjmp(jmpbuf, 1) != 0) {
         if (rtt_timeout(&rttinfo) < 0) {
-            err_msg("dg_send_recv: no response from server, giving up");
+            err_msg("Handshake: no response from server, giving up");
             rttinit = 0;
             errno = ETIMEDOUT;
             return (-1);
@@ -230,11 +265,10 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     msgrecv.msg_namelen = servaddrlen;
     msgrecv.msg_iov = iovrecv;
     msgrecv.msg_iovlen = 2;
-//    if (recvhdr.last == 1){
-//        printf("Last packet received");
- //       fflush(stdout);
-//    }
-    msgrecv.msg_iovlen = 2;
+    //    if (recvhdr.last == 1){
+    //        printf("Last packet received");
+    //       fflush(stdout);
+    //    }
     iovrecv[0].iov_base = &recvhdr;
     iovrecv[0].iov_len = sizeof(struct hdr);
     iovrecv[1].iov_base = recvline;
@@ -242,7 +276,7 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
     int n = 0;
     do{
         n = recvmsg(sockfd, &msgrecv, 0);
-//        printf("Received %s ", recvline);
+        //        printf("Received %s ", recvline);
         strcpy(recv_buf[recvhdr.seq].data, recvline);
         //      printf("\nReceiving %s %d %d %d %d %d\n", recvline, (int)sizeof(struct hdr), n, recvhdr.seq, curr_wsize, recvhdr.last);
         fflush(stdout);
@@ -287,8 +321,8 @@ int recv_from_srv(int sockfd, char *recvline, SA *servaddr, socklen_t servaddrle
 
           }
           */  
-//    if (recvhdr.last == 1)
-//        clear_up();
+    //    if (recvhdr.last == 1)
+    //        clear_up();
 }
 int main(int argc, char **argv){
     int sockfd;
@@ -300,7 +334,7 @@ int main(int argc, char **argv){
     }
     recv_buf = (buf_entry *)malloc(sizeof(buf_entry)*MAX_WSIZE);
     bzero(&servaddr, sizeof(servaddr));
-    
+
     servaddr.sin_family = AF_INET;
     servaddr.sin_port = htons(SERVER_PORT);
     Inet_pton(AF_INET, SERVER_IP, &servaddr.sin_addr);
@@ -314,12 +348,12 @@ int main(int argc, char **argv){
     fd_set readfs;
 
     int maxfd = max(STDIN_FILENO, sockfd);
-    
+
     printf("$> ");
     fflush(stdout);
     static int cmdacked = 0;
     clear_up();
-    
+
     int out_des = 1;
 
     while(1){ 
@@ -336,13 +370,12 @@ int main(int argc, char **argv){
             //           printf("Select called: ");
             //           fflush(stdout);
             //
-
             recv_from_srv(sockfd, recvline, (SA *)&servaddr, sizeof(servaddr), cmdacked);
             //            int n = Recvfrom(sockfd, recvline, MAXLINE, 0, NULL, NULL);
             //            recvline[n] = 0;
             Fputs(recvline, stdout);
             fflush(stdout);
-       memset(recvline, 0, sizeof(recvline));
+            memset(recvline, 0, sizeof(recvline));
         }
         else if (FD_ISSET(STDIN_FILENO, &readfs)){
             if(Fgets(sendline, MAXLINE, stdin) != NULL){
@@ -357,7 +390,7 @@ int main(int argc, char **argv){
                     close(sockfd);
                     clear_up();
                     exit(0);
-                
+
                 }
                 if (eph_port_recv == 0){
                     if ((sockfd = eph_cli_handshake(sockfd, &servaddr , SERVER_IP)) > 0){
@@ -370,6 +403,7 @@ int main(int argc, char **argv){
                 }
 
                 cmdacked = 0;
+
                 if (strstr(sendline, ">")){
                     char copy_cmd[MAXLINE];
                     strcpy(copy_cmd, sendline);
@@ -392,6 +426,7 @@ int main(int argc, char **argv){
                     fflush(stdout);
                 }
                 
+           //     rtt_init(&rttinfo);
                 rtt_init(&rttinfo);
                 rttinit = 1;
                 rtt_d_flag = 1;
@@ -403,6 +438,7 @@ int main(int argc, char **argv){
                     fflush(stdout);
                     return;
                 }
+                printf("Read Buffer Thread Created\n");
                 pthread_detach(tid_readr);
                 send_to_srv(sockfd, sendline, strlen(sendline), (SA *)&servaddr, sizeof(servaddr));
                 memset(sendline, 0, sizeof(sendline));
